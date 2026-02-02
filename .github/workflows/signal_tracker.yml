@@ -1,0 +1,52 @@
+name: Signal Tracker
+
+on:
+  schedule:
+    # Runs every 30 minutes from 9:30 AM to 5:00 PM ET (14:30-22:00 UTC)
+    # Note: GitHub uses UTC. ET = UTC-5 (or UTC-4 during DST)
+    - cron: '30 14 * * 1-5'   # 9:30 AM ET
+    - cron: '0 15 * * 1-5'    # 10:00 AM ET
+    - cron: '30 15 * * 1-5'   # 10:30 AM ET
+    - cron: '0 16 * * 1-5'    # 11:00 AM ET
+    - cron: '30 16 * * 1-5'   # 11:30 AM ET
+    - cron: '0 17 * * 1-5'    # 12:00 PM ET
+    - cron: '30 17 * * 1-5'   # 12:30 PM ET
+    - cron: '0 18 * * 1-5'    # 1:00 PM ET
+    - cron: '30 18 * * 1-5'   # 1:30 PM ET
+    - cron: '0 19 * * 1-5'    # 2:00 PM ET
+    - cron: '30 19 * * 1-5'   # 2:30 PM ET
+    - cron: '0 20 * * 1-5'    # 3:00 PM ET
+    - cron: '30 20 * * 1-5'   # 3:30 PM ET
+    - cron: '0 21 * * 1-5'    # 4:00 PM ET
+    - cron: '30 21 * * 1-5'   # 4:30 PM ET
+    - cron: '0 22 * * 1-5'    # 5:00 PM ET
+  workflow_dispatch:  # Allows manual runs
+
+jobs:
+  track-signals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Run signal tracker
+        env:
+          UW_API_TOKEN: ${{ secrets.UW_API_TOKEN }}
+        run: python signal_tracker_github.py
+
+      - name: Commit and push results
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add tracked_signals.json
+          git diff --staged --quiet || git commit -m "Update signals $(date -u +%Y-%m-%d_%H:%M)"
+          git push
