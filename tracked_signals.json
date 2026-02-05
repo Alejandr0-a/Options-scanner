@@ -33137,7 +33137,61 @@
       "return_20d": null,
       "return_30d": null,
       "outcome": null
+    },
+    {
+      "alert_id": "b71fc49a-0395-4947-aef9-9efdf452f448",
+      "scan_date": "2026-02-05",
+      "scan_time": "20:01",
+      "ticker": "UNH",
+      "strike": 270.0,
+      "expiry": "2026-02-06",
+      "premium": 63600.0,
+      "score": 95,
+      "flags": [
+        "Very aggressive (100%)",
+        "Very high V/OI (12.4x)",
+        "Very short DTE (0d)"
+      ],
+      "entry_price": 266.75,
+      "ask_pct": 100.0,
+      "voi_ratio": 12.4205128205128,
+      "price_5d": null,
+      "price_10d": null,
+      "price_20d": null,
+      "price_30d": null,
+      "return_5d": null,
+      "return_10d": null,
+      "return_20d": null,
+      "return_30d": null,
+      "outcome": null
+    },
+    {
+      "alert_id": "8c3c73c4-5063-4176-998c-11f2e801a7ef",
+      "scan_date": "2026-02-05",
+      "scan_time": "20:01",
+      "ticker": "GOOG",
+      "strike": 322.5,
+      "expiry": "2026-02-06",
+      "premium": 284735.0,
+      "score": 75,
+      "flags": [
+        "Very aggressive (100%)",
+        "Very short DTE (0d)",
+        "Sizable bet ($285K)"
+      ],
+      "entry_price": 329.22,
+      "ask_pct": 100.0,
+      "voi_ratio": 1.16733067729084,
+      "price_5d": null,
+      "price_10d": null,
+      "price_20d": null,
+      "price_30d": null,
+      "return_5d": null,
+      "return_10d": null,
+      "return_20d": null,
+      "return_30d": null,
+      "outcome": null
     }
   ],
-  "last_scan": "2026-02-05T20:00:09.181206"
+  "last_scan": "2026-02-05T20:01:43.250290"
 }
