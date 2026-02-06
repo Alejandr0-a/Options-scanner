@@ -89,6 +89,59 @@ def fetch_flow_alerts():
     return []
 
 
+# Cache for daily options volume
+_options_volume_cache = {}
+
+def get_daily_options_volume(ticker):
+    """
+    Fetch daily options volume to verify net premium sentiment.
+    Returns dict with call_premium, put_premium, net_premium, net_sentiment, confirmed.
+    """
+    global _options_volume_cache
+
+    # Check cache first
+    if ticker in _options_volume_cache:
+        return _options_volume_cache[ticker]
+
+    try:
+        resp = httpx.get(
+            f"{BASE_URL}/api/stock/{ticker}/options-volume",
+            headers=HEADERS,
+            params={"limit": 5},
+            timeout=30
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json().get("data", [])
+        if not data:
+            return None
+
+        # Get most recent day's data
+        latest = data[0]
+        call_premium = float(latest.get("call_premium", 0) or 0)
+        put_premium = float(latest.get("put_premium", 0) or 0)
+        net_premium = call_premium - put_premium
+
+        result = {
+            "date": latest.get("date", ""),
+            "call_premium": call_premium,
+            "put_premium": put_premium,
+            "net_premium": net_premium,
+            "net_sentiment": "BULLISH" if net_premium > 0 else "BEARISH",
+            "confirmed": net_premium > 0,
+        }
+
+        # Cache result
+        _options_volume_cache[ticker] = result
+        time.sleep(0.3)  # Rate limit
+        return result
+
+    except Exception as e:
+        print(f"Error fetching options volume for {ticker}: {e}")
+        return None
+
+
 def calculate_score(alert):
     """Calculate quality score for an alert"""
     score = 0
@@ -232,6 +285,25 @@ def scan_and_save():
         ask_pct_val = (total_ask_prem / total_prem * 100) if total_prem > 0 else 0
         voi_val = float(alert.get("volume_oi_ratio", 0) or 0)
 
+        # Verify net premium sentiment
+        vol_data = get_daily_options_volume(ticker)
+        if vol_data:
+            net_premium = vol_data["net_premium"]
+            net_sentiment = vol_data["net_sentiment"]
+            confirmed = vol_data["confirmed"]
+
+            # Adjust score based on confirmation
+            if confirmed:
+                score += 15  # Bonus for confirmed
+                flags.append(f"NET CONFIRMED (${net_premium/1000:.0f}K)")
+            else:
+                score -= 20  # Penalty for contradicted
+                flags.append(f"⚠️ NET BEARISH (${net_premium/1000:.0f}K)")
+        else:
+            net_premium = None
+            net_sentiment = "UNKNOWN"
+            confirmed = None
+
         signal = {
             "alert_id": alert_id,
             "scan_date": datetime.now().strftime("%Y-%m-%d"),
@@ -245,6 +317,9 @@ def scan_and_save():
             "entry_price": spot,
             "ask_pct": ask_pct_val,
             "voi_ratio": voi_val,
+            "net_premium": net_premium,
+            "net_sentiment": net_sentiment,
+            "confirmed": confirmed,
             "price_5d": None,
             "price_10d": None,
             "price_20d": None,
@@ -267,7 +342,15 @@ def scan_and_save():
     if new_signals:
         print("\n--- NEW SIGNALS ---")
         for s in sorted(new_signals, key=lambda x: x["score"], reverse=True)[:10]:
-            print(f"  {s['ticker']:6} Score:{s['score']:3} | ${s['premium']/1000:.0f}K | "
+            # Confirmation indicator
+            if s.get("confirmed") is True:
+                conf = "✅"
+            elif s.get("confirmed") is False:
+                conf = "❌"
+            else:
+                conf = "?"
+
+            print(f"  {conf} {s['ticker']:6} Score:{s['score']:3} | ${s['premium']/1000:.0f}K | "
                   f"Ask:{s['ask_pct']:.0f}% | V/OI:{s['voi_ratio']:.1f}x | {s['flags'][0]}")
 
     # Update existing signals with price data
