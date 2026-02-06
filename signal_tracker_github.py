@@ -89,8 +89,71 @@ def fetch_flow_alerts():
     return []
 
 
-# Cache for daily options volume
+# Cache for daily options volume and ticker info
 _options_volume_cache = {}
+_ticker_info_cache = {}
+
+
+def get_ticker_info(ticker):
+    """
+    Fetch company info: sector, market_cap, next_earnings.
+    Uses /api/stock/{ticker}/info endpoint.
+    """
+    global _ticker_info_cache
+
+    if ticker in _ticker_info_cache:
+        return _ticker_info_cache[ticker]
+
+    try:
+        resp = httpx.get(
+            f"{BASE_URL}/api/stock/{ticker}/info",
+            headers=HEADERS,
+            timeout=30
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json().get("data", {})
+        if not data:
+            return None
+
+        # Extract relevant fields
+        market_cap = data.get("market_cap")
+        if market_cap:
+            market_cap = float(market_cap)
+
+        result = {
+            "sector": data.get("sector"),
+            "industry": data.get("industry"),
+            "market_cap": market_cap,
+            "next_earnings": data.get("next_earnings_date"),
+            "name": data.get("name"),
+        }
+
+        _ticker_info_cache[ticker] = result
+        time.sleep(0.3)
+        return result
+
+    except Exception as e:
+        print(f"Error fetching ticker info for {ticker}: {e}")
+        return None
+
+
+def categorize_market_cap(market_cap):
+    """Categorize market cap into size buckets."""
+    if market_cap is None:
+        return None
+    if market_cap >= 200_000_000_000:  # $200B+
+        return "mega"
+    elif market_cap >= 10_000_000_000:  # $10B+
+        return "large"
+    elif market_cap >= 2_000_000_000:  # $2B+
+        return "mid"
+    elif market_cap >= 300_000_000:  # $300M+
+        return "small"
+    else:
+        return "micro"
+
 
 def get_daily_options_volume(ticker):
     """
@@ -289,6 +352,65 @@ def scan_and_save():
         ask_pct_val = (total_ask_prem / total_prem * 100) if total_prem > 0 else 0
         voi_val = float(alert.get("volume_oi_ratio", 0) or 0)
 
+        # --- MUST HAVE: Raw signal characteristics from alert ---
+        volume = int(alert.get("volume", 0) or 0)
+        open_interest = int(alert.get("open_interest", 0) or 0)
+        has_sweep = bool(alert.get("has_sweep", False))
+        trade_count = int(alert.get("trade_count", 0) or 0)
+
+        # Calculate DTE
+        try:
+            expiry_date = datetime.strptime(alert.get("expiry", "2099-12-31"), "%Y-%m-%d")
+            dte = (expiry_date - datetime.now()).days
+        except:
+            dte = None
+
+        # Calculate OTM %
+        strike = float(alert.get("strike", 0) or 0)
+        if spot > 0 and strike > 0:
+            otm_pct = ((strike - spot) / spot * 100) if strike > spot else 0
+        else:
+            otm_pct = None
+
+        # Option price at entry (mid price or ask)
+        option_bid = float(alert.get("bid", 0) or 0)
+        option_ask = float(alert.get("ask", 0) or 0)
+        if option_bid > 0 and option_ask > 0:
+            option_price_entry = (option_bid + option_ask) / 2
+        elif option_ask > 0:
+            option_price_entry = option_ask
+        else:
+            option_price_entry = None
+
+        # Alert rule (what triggered it)
+        alert_rule = alert.get("alert_rule") or alert.get("rule")
+
+        # --- MUST HAVE: Company context ---
+        ticker_info = get_ticker_info(ticker)
+        if ticker_info:
+            sector = ticker_info.get("sector")
+            industry = ticker_info.get("industry")
+            market_cap = ticker_info.get("market_cap")
+            cap_category = categorize_market_cap(market_cap)
+            next_earnings = ticker_info.get("next_earnings")
+
+            # Calculate days to earnings
+            if next_earnings:
+                try:
+                    earnings_date = datetime.strptime(next_earnings, "%Y-%m-%d")
+                    days_to_earnings = (earnings_date - datetime.now()).days
+                except:
+                    days_to_earnings = None
+            else:
+                days_to_earnings = None
+        else:
+            sector = None
+            industry = None
+            market_cap = None
+            cap_category = None
+            next_earnings = None
+            days_to_earnings = None
+
         # Verify net premium sentiment
         vol_data = get_daily_options_volume(ticker)
         if vol_data:
@@ -306,7 +428,7 @@ def scan_and_save():
                 flags.append(f"NET CONFIRMED (${net_premium/1000:.0f}K)")
             else:
                 score -= 20  # Penalty for contradicted
-                flags.append(f"⚠️ NET BEARISH (${net_premium/1000:.0f}K)")
+                flags.append(f"!! NET BEARISH (${net_premium/1000:.0f}K)")
         else:
             net_premium = None
             net_sentiment = "UNKNOWN"
@@ -317,11 +439,12 @@ def scan_and_save():
             daily_put_volume = None
 
         signal = {
+            # Core identification
             "alert_id": alert_id,
             "scan_date": datetime.now().strftime("%Y-%m-%d"),
             "scan_time": datetime.now().strftime("%H:%M"),
             "ticker": ticker,
-            "strike": float(alert.get("strike", 0) or 0),
+            "strike": strike,
             "expiry": alert.get("expiry", ""),
             "premium": float(alert.get("total_premium", 0) or 0),
             "score": score,
@@ -329,7 +452,30 @@ def scan_and_save():
             "entry_price": spot,
             "ask_pct": ask_pct_val,
             "voi_ratio": voi_val,
-            # Net premium verification - raw data for pattern analysis
+
+            # MUST HAVE: Raw signal characteristics
+            "volume": volume,
+            "open_interest": open_interest,
+            "has_sweep": has_sweep,
+            "trade_count": trade_count,
+            "dte": dte,
+            "otm_pct": otm_pct,
+
+            # SHOULD HAVE: Option pricing
+            "option_price_entry": option_price_entry,
+            "option_bid": option_bid,
+            "option_ask": option_ask,
+            "alert_rule": alert_rule,
+
+            # MUST HAVE: Company context
+            "sector": sector,
+            "industry": industry,
+            "market_cap": market_cap,
+            "cap_category": cap_category,
+            "next_earnings": next_earnings,
+            "days_to_earnings": days_to_earnings,
+
+            # Net premium verification
             "net_premium": net_premium,
             "net_sentiment": net_sentiment,
             "confirmed": confirmed,
@@ -337,6 +483,7 @@ def scan_and_save():
             "daily_put_premium": daily_put_premium,
             "daily_call_volume": daily_call_volume,
             "daily_put_volume": daily_put_volume,
+
             # Price tracking for outcome analysis
             "price_5d": None,
             "price_10d": None,
@@ -347,6 +494,13 @@ def scan_and_save():
             "return_20d": None,
             "return_30d": None,
             "outcome": None,
+
+            # NICE TO HAVE: Option price tracking (for future)
+            "option_price_5d": None,
+            "option_price_10d": None,
+            "option_price_20d": None,
+            "option_price_30d": None,
+            "option_return_30d": None,
         }
 
         new_signals.append(signal)
@@ -360,13 +514,13 @@ def scan_and_save():
     if new_signals:
         print("\n--- NEW SIGNALS ---")
         for s in sorted(new_signals, key=lambda x: x["score"], reverse=True)[:10]:
-            # Confirmation indicator
+            # Confirmation indicator (ASCII for Windows compatibility)
             if s.get("confirmed") is True:
-                conf = "✅"
+                conf = "OK"
             elif s.get("confirmed") is False:
-                conf = "❌"
+                conf = "!!"
             else:
-                conf = "?"
+                conf = "? "
 
             print(f"  {conf} {s['ticker']:6} Score:{s['score']:3} | ${s['premium']/1000:.0f}K | "
                   f"Ask:{s['ask_pct']:.0f}% | V/OI:{s['voi_ratio']:.1f}x | {s['flags'][0]}")
