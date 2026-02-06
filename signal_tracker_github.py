@@ -121,12 +121,16 @@ def get_daily_options_volume(ticker):
         latest = data[0]
         call_premium = float(latest.get("call_premium", 0) or 0)
         put_premium = float(latest.get("put_premium", 0) or 0)
+        call_volume = int(latest.get("call_volume", 0) or 0)
+        put_volume = int(latest.get("put_volume", 0) or 0)
         net_premium = call_premium - put_premium
 
         result = {
             "date": latest.get("date", ""),
             "call_premium": call_premium,
             "put_premium": put_premium,
+            "call_volume": call_volume,
+            "put_volume": put_volume,
             "net_premium": net_premium,
             "net_sentiment": "BULLISH" if net_premium > 0 else "BEARISH",
             "confirmed": net_premium > 0,
@@ -291,6 +295,10 @@ def scan_and_save():
             net_premium = vol_data["net_premium"]
             net_sentiment = vol_data["net_sentiment"]
             confirmed = vol_data["confirmed"]
+            daily_call_premium = vol_data["call_premium"]
+            daily_put_premium = vol_data["put_premium"]
+            daily_call_volume = vol_data.get("call_volume")
+            daily_put_volume = vol_data.get("put_volume")
 
             # Adjust score based on confirmation
             if confirmed:
@@ -303,6 +311,10 @@ def scan_and_save():
             net_premium = None
             net_sentiment = "UNKNOWN"
             confirmed = None
+            daily_call_premium = None
+            daily_put_premium = None
+            daily_call_volume = None
+            daily_put_volume = None
 
         signal = {
             "alert_id": alert_id,
@@ -317,9 +329,15 @@ def scan_and_save():
             "entry_price": spot,
             "ask_pct": ask_pct_val,
             "voi_ratio": voi_val,
+            # Net premium verification - raw data for pattern analysis
             "net_premium": net_premium,
             "net_sentiment": net_sentiment,
             "confirmed": confirmed,
+            "daily_call_premium": daily_call_premium,
+            "daily_put_premium": daily_put_premium,
+            "daily_call_volume": daily_call_volume,
+            "daily_put_volume": daily_put_volume,
+            # Price tracking for outcome analysis
             "price_5d": None,
             "price_10d": None,
             "price_20d": None,
