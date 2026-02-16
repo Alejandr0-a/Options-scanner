@@ -35,8 +35,18 @@ MIN_VOI_RATIO = 5.0
 
 # Excluded tickers
 EXCLUDED = {
-    "SPY", "QQQ", "IWM", "DIA", "VIX", "VXX", "UVXY", "SQQQ", "TQQQ",
-    "GLD", "SLV", "USO", "TLT", "XLF", "XLE", "ARKK", "COIN", "MARA", "MSTR",
+    # Indices
+    "SPY", "QQQ", "IWM", "DIA", "SPX", "SPXW", "RUTW", "NDX",
+    # Volatility
+    "VIX", "VXX", "UVXY",
+    # Leveraged ETFs
+    "SQQQ", "TQQQ", "SOXL", "SOXS", "SPXL", "SPXS", "TNA", "TZA",
+    # Sector ETFs
+    "XLF", "XLE", "XLK", "XLV", "XBI", "ARKK", "GDX", "GDXJ",
+    # Precious metals / commodities / currencies
+    "GLD", "SLV", "AEM", "USO", "UNG", "CPER", "TLT", "UUP", "FXE",
+    # Crypto-related
+    "COIN", "MARA", "MSTR", "HUT", "WULF", "RIOT", "BITF", "CLSK", "IBIT", "BITO",
 }
 
 
