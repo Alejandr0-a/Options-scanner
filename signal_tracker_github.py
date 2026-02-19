@@ -1,7 +1,14 @@
 """
 Signal Tracker - GitHub Actions Version
-Runs every 30 minutes during market hours (9:30 AM - 5:00 PM ET)
+Runs every 5 minutes during market hours (9:00 AM - 5:00 PM ET)
 Commits results back to the repository.
+
+v2 UPDATES (Feb 2026):
+- Scan every 5 minutes (was 30 min)
+- Market cap from Yahoo Finance (UW API doesn't return it)
+- Outcome tracking uses historical closes (was using current price)
+- Outcome tracking only runs on top-of-hour scans (efficiency)
+- Added +1d and +3d checkpoints
 """
 import os
 import json
@@ -32,6 +39,9 @@ SIGNALS_FILE = OUTPUT_DIR / "tracked_signals.json"
 MIN_SCORE = 70
 MIN_ASK_PCT = 80
 MIN_VOI_RATIO = 5.0
+
+# Outcome tracking
+MAX_OUTCOME_UPDATES = 50  # Max price fetches per run for outcome tracking
 
 # Excluded tickers
 EXCLUDED = {
@@ -83,6 +93,106 @@ def get_stock_price(ticker):
     return None
 
 
+def get_historical_close(ticker, target_date_str):
+    """Get closing price for a specific date using Yahoo Finance."""
+    try:
+        target = datetime.strptime(target_date_str, "%Y-%m-%d")
+        start = target - timedelta(days=3)
+        end = target + timedelta(days=3)
+        period1 = int(start.timestamp())
+        period2 = int(end.timestamp())
+
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            f"?period1={period1}&period2={period2}&interval=1d"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+
+        result = data.get("chart", {}).get("result", [])
+        if not result:
+            return None
+
+        timestamps = result[0].get("timestamp", [])
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+
+        if not timestamps or not closes:
+            return None
+
+        target_ts = int(target.timestamp())
+        best_close = None
+        best_diff = float("inf")
+
+        for ts, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            diff = abs(ts - target_ts)
+            if ts <= target_ts + 86400 and diff < best_diff:
+                best_diff = diff
+                best_close = close
+
+        return round(best_close, 4) if best_close else None
+    except Exception:
+        return None
+
+
+def _get_yahoo_crumb():
+    """Get Yahoo Finance crumb and cookie opener for authenticated requests."""
+    try:
+        import http.cookiejar
+        cj = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        req1 = urllib.request.Request("https://fc.yahoo.com", headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            opener.open(req1, timeout=10)
+        except Exception:
+            pass  # Expected to fail, but sets cookies
+        req2 = urllib.request.Request(
+            "https://query2.finance.yahoo.com/v1/test/getcrumb",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        crumb = opener.open(req2, timeout=10).read().decode()
+        return crumb, opener
+    except Exception:
+        return None, None
+
+
+# Module-level cache for Yahoo crumb (reused across calls)
+_yahoo_crumb = None
+_yahoo_opener = None
+
+
+def get_yahoo_quote(ticker):
+    """Get quote data (market cap, shares outstanding) from Yahoo Finance v7 API."""
+    global _yahoo_crumb, _yahoo_opener
+    if _yahoo_crumb is None:
+        _yahoo_crumb, _yahoo_opener = _get_yahoo_crumb()
+    if not _yahoo_crumb or not _yahoo_opener:
+        return None
+    try:
+        url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={ticker}&crumb={_yahoo_crumb}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = json.loads(_yahoo_opener.open(req, timeout=15).read().decode())
+        results = data.get("quoteResponse", {}).get("result", [])
+        if results:
+            return results[0]
+    except Exception:
+        # Crumb may have expired - try refreshing once
+        _yahoo_crumb, _yahoo_opener = _get_yahoo_crumb()
+    return None
+
+
+def get_market_cap_yahoo(ticker):
+    """Get market cap from Yahoo Finance."""
+    quote = get_yahoo_quote(ticker)
+    if quote:
+        mc = quote.get("marketCap")
+        if mc and float(mc) > 0:
+            return float(mc)
+    return None
+
+
 def fetch_flow_alerts():
     """Fetch current flow alerts from Unusual Whales"""
     try:
@@ -131,6 +241,11 @@ def get_ticker_info(ticker):
         market_cap = data.get("market_cap")
         if market_cap:
             market_cap = float(market_cap)
+
+        # Yahoo Finance fallback for market cap (UW API often returns None)
+        if not market_cap:
+            market_cap = get_market_cap_yahoo(ticker)
+            time.sleep(0.3)
 
         result = {
             "sector": data.get("sector"),
@@ -495,22 +610,19 @@ def scan_and_save():
             "daily_put_volume": daily_put_volume,
 
             # Price tracking for outcome analysis
+            "price_1d": None,
+            "price_3d": None,
             "price_5d": None,
             "price_10d": None,
             "price_20d": None,
             "price_30d": None,
+            "return_1d": None,
+            "return_3d": None,
             "return_5d": None,
             "return_10d": None,
             "return_20d": None,
             "return_30d": None,
             "outcome": None,
-
-            # NICE TO HAVE: Option price tracking (for future)
-            "option_price_5d": None,
-            "option_price_10d": None,
-            "option_price_20d": None,
-            "option_price_30d": None,
-            "option_return_30d": None,
         }
 
         new_signals.append(signal)
@@ -536,50 +648,82 @@ def scan_and_save():
                   f"Ask:{s['ask_pct']:.0f}% | V/OI:{s['voi_ratio']:.1f}x | {s['flags'][0]}")
 
     # Update existing signals with price data
-    print("\nUpdating price data for existing signals...")
+    # Only run full outcome tracking on top-of-hour scans (efficiency for 5-min runs)
+    now_utc = datetime.utcnow()
+    run_outcomes = (now_utc.minute < 10)  # Only first scan of each hour
+
+    if run_outcomes:
+        print("\nUpdating price data for existing signals (top-of-hour run)...")
+    else:
+        print("\nSkipping outcome tracking (not top-of-hour).")
+
     update_count = 0
+    price_cache = {}  # Cache: "TICKER_YYYY-MM-DD" -> price
 
-    for signal in data["signals"]:
-        scan_date = datetime.strptime(signal["scan_date"], "%Y-%m-%d")
-        days_elapsed = (datetime.now() - scan_date).days
-        ticker = signal["ticker"]
-        entry = signal["entry_price"]
+    if run_outcomes:
+        checkpoints = [
+            (1, "price_1d", "return_1d"),
+            (3, "price_3d", "return_3d"),
+            (5, "price_5d", "return_5d"),
+            (10, "price_10d", "return_10d"),
+            (20, "price_20d", "return_20d"),
+            (30, "price_30d", "return_30d"),
+        ]
 
-        if not entry or entry <= 0:
-            continue
+        for signal in data["signals"]:
+            if update_count >= MAX_OUTCOME_UPDATES:
+                break
 
-        needs_update = False
+            scan_date = datetime.strptime(signal["scan_date"], "%Y-%m-%d")
+            days_elapsed = (datetime.now() - scan_date).days
+            ticker = signal["ticker"]
+            entry = signal["entry_price"]
 
-        if days_elapsed >= 5 and signal["price_5d"] is None:
-            needs_update = True
-        if days_elapsed >= 10 and signal["price_10d"] is None:
-            needs_update = True
-        if days_elapsed >= 20 and signal["price_20d"] is None:
-            needs_update = True
-        if days_elapsed >= 30 and signal["price_30d"] is None:
-            needs_update = True
+            if not entry or entry <= 0:
+                continue
 
-        if needs_update:
-            current_price = get_stock_price(ticker)
-            if current_price:
-                if days_elapsed >= 5 and signal["price_5d"] is None:
-                    signal["price_5d"] = current_price
-                    signal["return_5d"] = (current_price - entry) / entry * 100
-                if days_elapsed >= 10 and signal["price_10d"] is None:
-                    signal["price_10d"] = current_price
-                    signal["return_10d"] = (current_price - entry) / entry * 100
-                if days_elapsed >= 20 and signal["price_20d"] is None:
-                    signal["price_20d"] = current_price
-                    signal["return_20d"] = (current_price - entry) / entry * 100
-                if days_elapsed >= 30 and signal["price_30d"] is None:
-                    signal["price_30d"] = current_price
-                    signal["return_30d"] = (current_price - entry) / entry * 100
-                    signal["outcome"] = "win" if signal["return_30d"] > 0 else "loss"
+            signal_updated = False
 
+            for days, price_key, return_key in checkpoints:
+                # Initialize fields for older signals that don't have +1d/+3d keys
+                if price_key not in signal:
+                    signal[price_key] = None
+                if return_key not in signal:
+                    signal[return_key] = None
+
+                if days_elapsed >= days and signal[price_key] is None:
+                    target_date = scan_date + timedelta(days=days)
+                    target_str = target_date.strftime("%Y-%m-%d")
+                    cache_key = f"{ticker}_{target_str}"
+
+                    # Check if target date is today or yesterday (use current price)
+                    days_to_target = (datetime.now() - target_date).days
+
+                    if cache_key in price_cache:
+                        price = price_cache[cache_key]
+                    elif days_to_target <= 1:
+                        price = get_stock_price(ticker)
+                        time.sleep(0.3)
+                        price_cache[cache_key] = price
+                    else:
+                        price = get_historical_close(ticker, target_str)
+                        time.sleep(0.3)
+                        price_cache[cache_key] = price
+
+                    if price:
+                        signal[price_key] = round(price, 4)
+                        signal[return_key] = round((price - entry) / entry * 100, 2)
+                        signal_updated = True
+
+            # Determine win/loss at 30d
+            if signal.get("price_30d") is not None and signal.get("outcome") is None:
+                signal["outcome"] = "win" if signal["return_30d"] > 0 else "loss"
+                signal_updated = True
+
+            if signal_updated:
                 update_count += 1
-                time.sleep(0.2)
 
-    print(f"Updated {update_count} signals with price data")
+        print(f"Updated {update_count} signals with price data")
 
     save_signals(data)
 
