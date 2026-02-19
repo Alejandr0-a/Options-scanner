@@ -24,7 +24,7 @@ except ImportError:
     httpx = None
 
 SCRIPT_DIR = Path(__file__).parent
-SIGNALS_FILE = SCRIPT_DIR / "tracked_signals.json"
+SIGNALS_FILE = SCRIPT_DIR / "signal_database.json"
 REQUEST_DELAY = 0.4
 
 # UW API (optional - for sector/earnings backfill)

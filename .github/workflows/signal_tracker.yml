@@ -34,13 +34,13 @@ jobs:
       - name: Run signal tracker
         env:
           UW_API_TOKEN: ${{ secrets.UW_API_TOKEN }}
-        run: python signal_tracker_github.py
+        run: python signal_collector.py
 
       - name: Commit and push results
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git pull --rebase || true
-          git add tracked_signals.json
+          git add signal_database.json
           git diff --staged --quiet || git commit -m "Update signals $(date -u +%Y-%m-%d_%H:%M)"
           git push

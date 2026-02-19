@@ -33,7 +33,7 @@ BASE_URL = "https://api.unusualwhales.com"
 HEADERS = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
 
 OUTPUT_DIR = Path(__file__).parent
-SIGNALS_FILE = OUTPUT_DIR / "tracked_signals.json"
+SIGNALS_FILE = OUTPUT_DIR / "signal_database.json"
 
 # Quality thresholds
 MIN_SCORE = 70
