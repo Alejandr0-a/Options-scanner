@@ -79,6 +79,15 @@ EXCLUDED = {
     "GLD", "SLV", "AEM", "USO", "UNG", "CPER", "TLT", "UUP", "FXE",
     # Crypto-related
     "COIN", "MARA", "MSTR", "HUT", "WULF", "RIOT", "BITF", "CLSK", "IBIT", "BITO",
+    # Country / region ETFs
+    "FXI", "EWZ", "EWJ", "EWT", "EWY", "EWG", "EWU", "EWA", "EWC", "EWH",
+    "EWS", "EWM", "EWP", "EWQ", "EWI", "EWL", "EWN", "EWD", "EWK", "EWO",
+    "INDA", "MCHI", "THD", "EPOL", "TUR", "ECH", "ARGT", "GXG", "EIDO",
+    "RSX", "FLBR", "FLCH", "FLJP", "FLGB", "FLKR",
+    # Broad market / international ETFs
+    "EEM", "EFA", "VTI", "VOO", "IVV", "VWO", "VEA", "IEMG", "ACWI", "VT",
+    "VXUS", "IXUS", "SCHF", "IEFA", "KWEB", "ASHR", "MSOS", "AMLP",
+    "ARKK", "ARKG", "ARKF", "ARKW", "ARKQ",
 }
 
 
