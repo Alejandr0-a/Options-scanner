@@ -33,6 +33,9 @@ V5 ENHANCEMENTS (Feb 22, 2026):
 - INTRADAY TIMING: scan_hour field (UTC) for time-of-day analysis
 - EXIT FRAMEWORK: peak_return, peak_checkpoint, drawdown_from_peak fields
 - BUG FIXES: exclusion list enforcement, V/OI hard gate, DTE multi-format parsing
+- DATA CAPTURE: executed_at, total_size, uw_sentiment, underlying_type from flow alerts
+- DATA CAPTURE: short_interest, shares_float, avg_30d_volume from ticker info
+- DATA CAPTURE: 5-day options volume history (was saving only latest day)
 """
 import os
 import json
@@ -293,6 +296,10 @@ def get_ticker_info(ticker):
             "market_cap": market_cap,
             "next_earnings": data.get("next_earnings_date"),
             "name": data.get("name"),
+            # Free fields from same endpoint
+            "short_interest": float(data["short_interest"]) if data.get("short_interest") else None,
+            "shares_float": float(data["shares_float"]) if data.get("shares_float") else None,
+            "avg_30d_volume": int(float(data["avg_30_volume"])) if data.get("avg_30_volume") else None,
         }
 
         _ticker_info_cache[ticker] = result
@@ -353,6 +360,17 @@ def get_daily_options_volume(ticker):
         put_volume = int(latest.get("put_volume", 0) or 0)
         net_premium = call_premium - put_premium
 
+        # Store full 5-day history (we fetch it anyway, don't discard it)
+        volume_history = []
+        for day in data[:5]:
+            volume_history.append({
+                "date": day.get("date", ""),
+                "call_premium": float(day.get("call_premium", 0) or 0),
+                "put_premium": float(day.get("put_premium", 0) or 0),
+                "call_volume": int(day.get("call_volume", 0) or 0),
+                "put_volume": int(day.get("put_volume", 0) or 0),
+            })
+
         result = {
             "date": latest.get("date", ""),
             "call_premium": call_premium,
@@ -362,6 +380,7 @@ def get_daily_options_volume(ticker):
             "net_premium": net_premium,
             "net_sentiment": "BULLISH" if net_premium > 0 else "BEARISH",
             "confirmed": net_premium > 0,
+            "volume_history_5d": volume_history,
         }
 
         # Cache result
@@ -598,6 +617,12 @@ def scan_and_save():
         # Alert rule (what triggered it)
         alert_rule = alert.get("alert_rule") or alert.get("rule")
 
+        # Free fields from flow alert (already fetched, just not saved before)
+        executed_at = alert.get("executed_at") or alert.get("timestamp") or ""
+        total_size = int(alert.get("total_size", 0) or 0)  # Contract count
+        uw_sentiment = alert.get("sentiment", "")  # UW's own classification
+        underlying_type = alert.get("underlying_type", "")
+
         # --- MUST HAVE: Company context ---
         ticker_info = get_ticker_info(ticker)
         if ticker_info:
@@ -606,6 +631,9 @@ def scan_and_save():
             market_cap = ticker_info.get("market_cap")
             cap_category = categorize_market_cap(market_cap)
             next_earnings = ticker_info.get("next_earnings")
+            short_interest = ticker_info.get("short_interest")
+            shares_float = ticker_info.get("shares_float")
+            avg_30d_volume = ticker_info.get("avg_30d_volume")
 
             # Calculate days to earnings
             if next_earnings:
@@ -623,6 +651,9 @@ def scan_and_save():
             cap_category = None
             next_earnings = None
             days_to_earnings = None
+            short_interest = None
+            shares_float = None
+            avg_30d_volume = None
 
         # --- V4: SECTOR PENALTY ---
         if sector in SECTOR_PENALTIES:
@@ -710,6 +741,12 @@ def scan_and_save():
             "implied_leverage": implied_leverage,
             "alert_rule": alert_rule,
 
+            # Flow alert metadata (free -- already fetched)
+            "executed_at": executed_at,
+            "total_size": total_size,
+            "uw_sentiment": uw_sentiment,
+            "underlying_type": underlying_type,
+
             # MUST HAVE: Company context
             "sector": sector,
             "industry": industry,
@@ -717,6 +754,9 @@ def scan_and_save():
             "cap_category": cap_category,
             "next_earnings": next_earnings,
             "days_to_earnings": days_to_earnings,
+            "short_interest": short_interest,
+            "shares_float": shares_float,
+            "avg_30d_volume": avg_30d_volume,
 
             # Net premium verification
             "net_premium": net_premium,
@@ -726,6 +766,7 @@ def scan_and_save():
             "daily_put_premium": daily_put_premium,
             "daily_call_volume": daily_call_volume,
             "daily_put_volume": daily_put_volume,
+            "volume_history_5d": vol_data.get("volume_history_5d") if vol_data else None,
 
             # Price tracking for outcome analysis
             "price_1d": None,
