@@ -92,7 +92,7 @@ EXCLUDED = {
 
 
 def load_signals():
-    """Load existing tracked signals"""
+    """Load existing tracked signals. Historical data is never deleted."""
     if SIGNALS_FILE.exists():
         with open(SIGNALS_FILE) as f:
             return json.load(f)
@@ -448,13 +448,19 @@ def calculate_score(alert):
 
     # --- 5. DTE -- PENALTY ONLY (was +30 bonus) ---
     # Data: DTE 0-3 has 38.8% win rate (worst bucket). All DTE underperform.
-    try:
-        expiry = datetime.strptime(alert.get("expiry", "2099-12-31"), "%Y-%m-%d")
-        dte = (expiry - datetime.now()).days
-    except:
-        dte = 999
+    dte = None
+    expiry_raw = alert.get("expiry") or ""
+    expiry_raw = str(expiry_raw).strip()
+    if expiry_raw:
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                expiry = datetime.strptime(expiry_raw, fmt)
+                dte = (expiry - datetime.now()).days
+                break
+            except ValueError:
+                continue
 
-    if dte <= 3:
+    if dte is not None and dte <= 3:
         score -= 5  # Danger zone
 
     # --- REMOVED FEATURES ---
@@ -481,11 +487,11 @@ def scan_and_save():
     new_signals = []
 
     for alert in alerts:
-        ticker = alert.get("ticker", "")
-        opt_type = alert.get("type", "").lower()
+        ticker = (alert.get("ticker") or "").strip().upper()
+        opt_type = (alert.get("type") or "").lower()
         alert_id = alert.get("id", "")
 
-        if ticker in EXCLUDED:
+        if not ticker or ticker in EXCLUDED:
             continue
         if opt_type != "call":
             continue
@@ -494,9 +500,13 @@ def scan_and_save():
 
         score, flags, ask_pct_val, voi_val, dte, otm_pct, premium_val = calculate_score(alert)
 
-        # V4: Pre-enrichment score check (sector/cap/earnings adjust later)
-        # A signal with just V/OI >= 5 gets 20 pts, which passes MIN_SCORE=20
-        if score < MIN_SCORE and voi_val < MIN_VOI_RATIO:
+        # Hard gate: V/OI is the only validated predictive feature.
+        # Signals below MIN_VOI_RATIO are noise regardless of other factors.
+        if voi_val < MIN_VOI_RATIO:
+            continue
+
+        # Pre-enrichment score check (sector/cap/earnings adjust later)
+        if score < MIN_SCORE:
             continue
 
         spot = float(alert.get("underlying_price", 0) or 0)
