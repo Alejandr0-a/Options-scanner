@@ -24,6 +24,15 @@ V4 SCORING (Feb 21, 2026):
 - MIN_SCORE lowered from 70 to 20 (V4 scale is tighter)
 - Cross-referenced against Feb 2026 big movers: pre-catalyst signals
   averaged $27K median premium, 0.7x median V/OI, 28% sweep rate
+
+V5 ENHANCEMENTS (Feb 22, 2026):
+- PUT SCANNING: now captures both calls and puts (was calls only)
+- Sentiment confirmation inverted for puts (bearish net premium = confirming)
+- Outcome tracking: puts win when stock drops (inverted from calls)
+- OPTION LEVERAGE: implied_leverage field + estimate_option_return() at checkpoints
+- INTRADAY TIMING: scan_hour field (UTC) for time-of-day analysis
+- EXIT FRAMEWORK: peak_return, peak_checkpoint, drawdown_from_peak fields
+- BUG FIXES: exclusion list enforcement, V/OI hard gate, DTE multi-format parsing
 """
 import os
 import json
@@ -471,6 +480,52 @@ def calculate_score(alert):
     return score, flags, ask_pct, voi, dte, otm_pct, premium
 
 
+def estimate_option_return(entry_price, checkpoint_price, strike, option_price_entry,
+                           dte_at_entry, days_elapsed, opt_type="call"):
+    """
+    Estimate option P&L using delta approximation from moneyness.
+
+    No free API for historical option prices, so we approximate:
+    option_return ~ (delta * stock_move) / option_price, adjusted for time decay.
+    Captures the key insight: a 2% stock move on a $0.50 option = potentially 40%+ gain.
+    """
+    if not option_price_entry or option_price_entry <= 0:
+        return None
+    if not checkpoint_price or not entry_price:
+        return None
+
+    stock_move = checkpoint_price - entry_price
+    if opt_type == "put":
+        stock_move = -stock_move  # Puts profit from decline
+
+    # Delta estimate from moneyness (how far ITM/OTM the option is)
+    if opt_type == "call":
+        moneyness = (entry_price - strike) / entry_price  # positive = ITM
+    else:
+        moneyness = (strike - entry_price) / entry_price
+
+    if moneyness >= 0.05:
+        delta = 0.70
+    elif moneyness >= 0:
+        delta = 0.55
+    elif moneyness >= -0.05:
+        delta = 0.40
+    elif moneyness >= -0.15:
+        delta = 0.25
+    else:
+        delta = 0.10
+
+    # Time decay: sqrt approximation (theta accelerates near expiry)
+    if dte_at_entry and dte_at_entry > 0:
+        dte_remaining = max(dte_at_entry - days_elapsed, 0)
+        time_factor = (dte_remaining / dte_at_entry) ** 0.5
+    else:
+        time_factor = 1.0
+
+    estimated_new_price = max((option_price_entry + delta * stock_move) * time_factor, 0)
+    return round((estimated_new_price - option_price_entry) / option_price_entry * 100, 1)
+
+
 def scan_and_save():
     """Scan for new high-quality signals and save them"""
     print("=" * 60)
@@ -493,7 +548,7 @@ def scan_and_save():
 
         if not ticker or ticker in EXCLUDED:
             continue
-        if opt_type != "call":
+        if opt_type not in ("call", "put"):
             continue
         if alert_id in existing_ids:
             continue
@@ -525,7 +580,10 @@ def scan_and_save():
         # Recalculate OTM % with actual spot (may differ from alert's underlying_price)
         strike = float(alert.get("strike", 0) or 0)
         if spot > 0 and strike > 0:
-            otm_pct = ((strike - spot) / spot * 100) if strike > spot else 0
+            if opt_type == "call":
+                otm_pct = ((strike - spot) / spot * 100) if strike > spot else 0
+            else:  # put
+                otm_pct = ((spot - strike) / spot * 100) if strike < spot else 0
 
         # Option price at entry (mid price or ask)
         option_bid = float(alert.get("bid", 0) or 0)
@@ -599,9 +657,13 @@ def scan_and_save():
             # V4: Contradicted penalty only (confirmed no longer gets bonus)
             # Data showed: Confirmed 42.8% win vs Unknown 69.2%
             # "Confirmed" may indicate crowded trades, not insider conviction
+            # For puts: bearish net premium is confirming, bullish is contradicting
+            if opt_type == "put":
+                confirmed = not confirmed  # Invert for puts
             if not confirmed:
                 score -= 10
-                flags.append(f"!! NET BEARISH (${net_premium/1000:.0f}K)")
+                direction = "BULLISH" if opt_type == "put" else "BEARISH"
+                flags.append(f"!! NET {direction} (${net_premium/1000:.0f}K)")
         else:
             net_premium = None
             net_sentiment = "UNKNOWN"
@@ -611,11 +673,18 @@ def scan_and_save():
             daily_call_volume = None
             daily_put_volume = None
 
+        # Implied leverage: stock price / option price
+        implied_leverage = None
+        if option_price_entry and option_price_entry > 0:
+            implied_leverage = round(spot / option_price_entry, 1)
+
         signal = {
             # Core identification
             "alert_id": alert_id,
             "scan_date": datetime.now().strftime("%Y-%m-%d"),
             "scan_time": datetime.now().strftime("%H:%M"),
+            "scan_hour": datetime.utcnow().hour,
+            "opt_type": opt_type,
             "ticker": ticker,
             "strike": strike,
             "expiry": alert.get("expiry", ""),
@@ -638,6 +707,7 @@ def scan_and_save():
             "option_price_entry": option_price_entry,
             "option_bid": option_bid,
             "option_ask": option_ask,
+            "implied_leverage": implied_leverage,
             "alert_rule": alert_rule,
 
             # MUST HAVE: Company context
@@ -671,6 +741,19 @@ def scan_and_save():
             "return_20d": None,
             "return_30d": None,
             "outcome": None,
+
+            # Option return estimates (delta approximation)
+            "option_return_1d": None,
+            "option_return_3d": None,
+            "option_return_5d": None,
+            "option_return_10d": None,
+            "option_return_20d": None,
+            "option_return_30d": None,
+
+            # Exit framework (populated by outcome tracker)
+            "peak_return": None,
+            "peak_checkpoint": None,
+            "drawdown_from_peak": None,
         }
 
         # Final V4 score gate (after all enrichment adjustments)
@@ -696,7 +779,8 @@ def scan_and_save():
             else:
                 conf = "? "
 
-            print(f"  {conf} {s['ticker']:6} Score:{s['score']:3} | ${s['premium']/1000:.0f}K | "
+            otype = "PUT " if s.get("opt_type") == "put" else "CALL"
+            print(f"  {conf} {otype} {s['ticker']:6} Score:{s['score']:3} | ${s['premium']/1000:.0f}K | "
                   f"Ask:{s['ask_pct']:.0f}% | V/OI:{s['voi_ratio']:.1f}x | {s['flags'][0]}")
 
     # Update existing signals with price data
@@ -767,9 +851,38 @@ def scan_and_save():
                         signal[return_key] = round((price - entry) / entry * 100, 2)
                         signal_updated = True
 
+                        # Estimate option return at this checkpoint
+                        opt_return_key = f"option_return_{days}d"
+                        if signal.get("option_price_entry"):
+                            signal[opt_return_key] = estimate_option_return(
+                                entry, price, signal.get("strike", 0),
+                                signal["option_price_entry"],
+                                signal.get("dte"), days,
+                                signal.get("opt_type", "call")
+                            )
+
+            # Update exit framework: peak return, drawdown from peak
+            returns_so_far = []
+            for k in [1, 3, 5, 10, 20, 30]:
+                r = signal.get(f"return_{k}d")
+                if r is not None:
+                    returns_so_far.append((k, r))
+            if returns_so_far:
+                # For puts, stock return is negative when winning. Use absolute direction.
+                is_put = signal.get("opt_type") == "put"
+                directed = [(-r if is_put else r, k) for k, r in returns_so_far]
+                best_val, best_k = max(directed, key=lambda x: x[0])
+                signal["peak_return"] = round(best_val, 2)
+                signal["peak_checkpoint"] = f"{best_k}d"
+                latest_val = directed[-1][0]
+                signal["drawdown_from_peak"] = round(latest_val - best_val, 2)
+
             # Determine win/loss at 30d
             if signal.get("price_30d") is not None and signal.get("outcome") is None:
-                signal["outcome"] = "win" if signal["return_30d"] > 0 else "loss"
+                if signal.get("opt_type") == "put":
+                    signal["outcome"] = "win" if signal["return_30d"] < 0 else "loss"
+                else:
+                    signal["outcome"] = "win" if signal["return_30d"] > 0 else "loss"
                 signal_updated = True
 
             if signal_updated:
