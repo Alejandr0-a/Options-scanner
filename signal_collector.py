@@ -9,6 +9,21 @@ v2 UPDATES (Feb 2026):
 - Outcome tracking uses historical closes (was using current price)
 - Outcome tracking only runs on top-of-hour scans (efficiency)
 - Added +1d and +3d checkpoints
+
+V4 SCORING (Feb 21, 2026):
+- Backtested 3,347 signals with return data (Feb 2-17, 2026)
+- V/OI is the only validated predictive feature (61% win rate at >= 10x)
+- REMOVED: DTE bonus (was +30, data shows DTE 0-3 = 38.8% win rate)
+- REMOVED: Sweep bonus (was +15, data shows sweeps = 42.1% vs 56.2%)
+- REMOVED: Block trade bonus (was +20, data shows 1-3 fills = 32.1%)
+- REMOVED: Large premium bonus (was +15, $500K+ is institutional hedging)
+- ADDED: Insider-sized premium sweet spot ($50K-$200K = +15)
+- ADDED: Sector penalties (Consumer Defensive = 27% win rate)
+- ADDED: Earnings proximity bonus (pre-earnings + high V/OI = best combo)
+- Ask % demoted from +35 to +3 (not predictive)
+- MIN_SCORE lowered from 70 to 20 (V4 scale is tighter)
+- Cross-referenced against Feb 2026 big movers: pre-catalyst signals
+  averaged $27K median premium, 0.7x median V/OI, 28% sweep rate
 """
 import os
 import json
@@ -35,10 +50,17 @@ HEADERS = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
 OUTPUT_DIR = Path(__file__).parent
 SIGNALS_FILE = OUTPUT_DIR / "signal_database.json"
 
-# Quality thresholds
-MIN_SCORE = 70
-MIN_ASK_PCT = 80
+# Quality thresholds (V4: lowered to capture more signals on tighter scale)
+MIN_SCORE = 20
 MIN_VOI_RATIO = 5.0
+
+# Sectors to penalize (backtest: sub-40% win rates at 5d)
+SECTOR_PENALTIES = {
+    "Consumer Defensive": -15,    # 27% win rate, -5.47% avg
+    "Financial Services": -10,    # 41.5%, -2.06%
+    "Basic Materials": -5,        # 38.4%, -1.84%
+    "Communication Services": -5, # 41.6%, -1.51%
+}
 
 # Outcome tracking
 MAX_OUTCOME_UPDATES = 50  # Max price fetches per run for outcome tracking
@@ -335,58 +357,73 @@ def get_daily_options_volume(ticker):
 
 
 def calculate_score(alert):
-    """Calculate quality score for an alert"""
+    """
+    V4 scoring model -- outcome-validated, insider-aware.
+
+    Backtested on 3,347 signals (Feb 2-17, 2026). Cross-referenced against
+    22 major stock moves to profile real pre-catalyst flow patterns.
+
+    Key findings driving V4:
+    - V/OI is the ONLY feature validated across all timeframes
+    - Insiders use modest-sized bets ($20K-$200K), not whale trades
+    - Sweeps, block trades, short DTE are anti-predictive (noise/hedging)
+    - V4 top quartile: 61% win rate, +2.24% avg (vs V3 top: 44%, -1.00%)
+    """
     score = 0
     flags = []
 
-    # 1. Aggression (% at ask)
+    # --- 1. V/OI RATIO -- THE DOMINANT SIGNAL (max 50 pts) ---
+    # Validated: 64.4% win at >= 50x, 61.7% at 10-19x, 67.5% at 20-49x (10d)
+    voi_str = alert.get("volume_oi_ratio", "0")
+    voi = float(voi_str) if voi_str else 0
+
+    if voi >= 50:
+        score += 50
+        flags.append(f"Extreme V/OI ({voi:.0f}x)")
+    elif voi >= 20:
+        score += 45
+        flags.append(f"Very high V/OI ({voi:.0f}x)")
+    elif voi >= 10:
+        score += 35
+        flags.append(f"High V/OI ({voi:.1f}x)")
+    elif voi >= 5:
+        score += 20
+        flags.append(f"Elevated V/OI ({voi:.1f}x)")
+    elif 0 < voi < 1:
+        score -= 5  # Below average
+
+    # --- 2. PREMIUM SWEET SPOT -- INSIDER-SIZED (max 15 pts) ---
+    # Cross-reference: pre-catalyst signals average $27K median premium.
+    # $50K-$200K had best performance. $500K+ is institutional hedging.
+    premium = float(alert.get("total_premium", 0) or 0)
+    if 50_000 <= premium < 200_000:
+        score += 15
+        flags.append(f"Insider-sized (${premium/1000:.0f}K)")
+    elif 200_000 <= premium < 500_000:
+        score += 10
+        flags.append(f"Sizable (${premium/1000:.0f}K)")
+    elif 20_000 <= premium < 50_000:
+        score += 5
+        flags.append(f"Modest bet (${premium/1000:.0f}K)")
+    # No bonus for $500K+ or < $20K
+
+    # --- 3. ASK % -- HEAVILY DEMOTED (max 3 pts, was 35) ---
+    # Data: Ask < 80% (59.1%, +1.84%) outperforms Ask >= 98% (52.2%, +0.68%)
     total_ask_prem = float(alert.get("total_ask_side_prem", 0) or 0)
     total_bid_prem = float(alert.get("total_bid_side_prem", 0) or 0)
     total_prem = total_ask_prem + total_bid_prem
     ask_pct = (total_ask_prem / total_prem * 100) if total_prem > 0 else 0
 
     if ask_pct >= 95:
-        score += 35
-        flags.append(f"Very aggressive ({ask_pct:.0f}%)")
-    elif ask_pct >= 85:
-        score += 25
-        flags.append(f"Aggressive ({ask_pct:.0f}%)")
+        score += 3
 
-    # 2. V/OI ratio
-    voi_str = alert.get("volume_oi_ratio", "0")
-    voi = float(voi_str) if voi_str else 0
-
-    if voi >= 20:
-        score += 35
-        flags.append(f"Extreme V/OI ({voi:.1f}x)")
-    elif voi >= 10:
-        score += 30
-        flags.append(f"Very high V/OI ({voi:.1f}x)")
-    elif voi >= 5:
-        score += 20
-        flags.append(f"High V/OI ({voi:.1f}x)")
-
-    # 3. DTE
-    try:
-        expiry = datetime.strptime(alert.get("expiry", "2099-12-31"), "%Y-%m-%d")
-        dte = (expiry - datetime.now()).days
-    except:
-        dte = 999
-
-    if dte <= 7:
-        score += 30
-        flags.append(f"Very short DTE ({dte}d)")
-    elif dte <= 14:
-        score += 20
-        flags.append(f"Short DTE ({dte}d)")
-    elif dte <= 21:
-        score += 10
-        flags.append(f"Near-term ({dte}d)")
-
-    # 4. OTM %
+    # --- 4. OTM % -- SMALL BONUS FOR MODERATE OTM (max 5 pts) ---
+    # V/OI>=20 + OTM>=5% + Confirmed at 10d: 79.4% win rate.
+    # But deep OTM alone doesn't help. Danger zone at 0-5%.
     strike = float(alert.get("strike", 0) or 0)
     spot = float(alert.get("underlying_price", 0) or 0)
     opt_type = alert.get("type", "").lower()
+    otm_pct = 0
 
     if spot > 0 and strike > 0:
         if opt_type == "call":
@@ -394,40 +431,29 @@ def calculate_score(alert):
         else:
             otm_pct = ((spot - strike) / spot * 100) if strike < spot else 0
 
-        if otm_pct >= 15:
-            score += 25
-            flags.append(f"Deep OTM ({otm_pct:.1f}%)")
-        elif otm_pct >= 10:
-            score += 20
-            flags.append(f"OTM ({otm_pct:.1f}%)")
-        elif otm_pct >= 5:
-            score += 10
-            flags.append(f"Slightly OTM ({otm_pct:.1f}%)")
+        if 5 <= otm_pct <= 15:
+            score += 5
+            flags.append(f"Moderate OTM ({otm_pct:.0f}%)")
+        elif 0 < otm_pct < 5:
+            score -= 5  # Danger zone
 
-    # 5. Sweep
-    if alert.get("has_sweep"):
-        score += 15
-        flags.append("Sweep order")
+    # --- 5. DTE -- PENALTY ONLY (was +30 bonus) ---
+    # Data: DTE 0-3 has 38.8% win rate (worst bucket). All DTE underperform.
+    try:
+        expiry = datetime.strptime(alert.get("expiry", "2099-12-31"), "%Y-%m-%d")
+        dte = (expiry - datetime.now()).days
+    except:
+        dte = 999
 
-    # 6. Fill count
-    fills = int(alert.get("trade_count", 999) or 999)
-    if fills <= 5:
-        score += 20
-        flags.append(f"Block trade ({fills} fills)")
-    elif fills <= 10:
-        score += 10
-        flags.append(f"Few fills ({fills})")
+    if dte <= 3:
+        score -= 5  # Danger zone
 
-    # 7. Premium size
-    premium = float(alert.get("total_premium", 0) or 0)
-    if premium >= 500000:
-        score += 15
-        flags.append(f"Large bet (${premium/1000:.0f}K)")
-    elif premium >= 200000:
-        score += 10
-        flags.append(f"Sizable bet (${premium/1000:.0f}K)")
+    # --- REMOVED FEATURES ---
+    # Sweep: REMOVED (42.1% win vs 56.2% without -- anti-predictive)
+    # Block trade (low fills): REMOVED (1-3 fills = 32.1% win rate)
+    # Large premium bonus: REMOVED (replaced by insider sweet spot above)
 
-    return score, flags
+    return score, flags, ask_pct, voi, dte, otm_pct, premium
 
 
 def scan_and_save():
@@ -457,11 +483,11 @@ def scan_and_save():
         if alert_id in existing_ids:
             continue
 
-        score, flags = calculate_score(alert)
+        score, flags, ask_pct_val, voi_val, dte, otm_pct, premium_val = calculate_score(alert)
 
-        if score < MIN_SCORE:
-            continue
-        if len(flags) < 2:
+        # V4: Pre-enrichment score check (sector/cap/earnings adjust later)
+        # A signal with just V/OI >= 5 gets 20 pts, which passes MIN_SCORE=20
+        if score < MIN_SCORE and voi_val < MIN_VOI_RATIO:
             continue
 
         spot = float(alert.get("underlying_price", 0) or 0)
@@ -471,31 +497,16 @@ def scan_and_save():
         if not spot:
             continue
 
-        total_ask_prem = float(alert.get("total_ask_side_prem", 0) or 0)
-        total_bid_prem = float(alert.get("total_bid_side_prem", 0) or 0)
-        total_prem = total_ask_prem + total_bid_prem
-        ask_pct_val = (total_ask_prem / total_prem * 100) if total_prem > 0 else 0
-        voi_val = float(alert.get("volume_oi_ratio", 0) or 0)
-
         # --- MUST HAVE: Raw signal characteristics from alert ---
         volume = int(alert.get("volume", 0) or 0)
         open_interest = int(alert.get("open_interest", 0) or 0)
         has_sweep = bool(alert.get("has_sweep", False))
         trade_count = int(alert.get("trade_count", 0) or 0)
 
-        # Calculate DTE
-        try:
-            expiry_date = datetime.strptime(alert.get("expiry", "2099-12-31"), "%Y-%m-%d")
-            dte = (expiry_date - datetime.now()).days
-        except:
-            dte = None
-
-        # Calculate OTM %
+        # Recalculate OTM % with actual spot (may differ from alert's underlying_price)
         strike = float(alert.get("strike", 0) or 0)
         if spot > 0 and strike > 0:
             otm_pct = ((strike - spot) / spot * 100) if strike > spot else 0
-        else:
-            otm_pct = None
 
         # Option price at entry (mid price or ask)
         option_bid = float(alert.get("bid", 0) or 0)
@@ -536,6 +547,25 @@ def scan_and_save():
             next_earnings = None
             days_to_earnings = None
 
+        # --- V4: SECTOR PENALTY ---
+        if sector in SECTOR_PENALTIES:
+            score += SECTOR_PENALTIES[sector]
+            flags.append(f"Weak sector ({sector})")
+
+        # --- V4: MARKET CAP BONUS ---
+        if cap_category == "large":
+            score += 5
+        elif cap_category == "mega":
+            score += 3
+
+        # --- V4: EARNINGS PROXIMITY BONUS ---
+        if days_to_earnings is not None and 0 <= days_to_earnings <= 7:
+            score += 10
+            flags.append(f"Pre-earnings ({days_to_earnings}d)")
+        elif days_to_earnings is not None and 8 <= days_to_earnings <= 14:
+            score += 5
+            flags.append(f"Near earnings ({days_to_earnings}d)")
+
         # Verify net premium sentiment
         vol_data = get_daily_options_volume(ticker)
         if vol_data:
@@ -547,12 +577,11 @@ def scan_and_save():
             daily_call_volume = vol_data.get("call_volume")
             daily_put_volume = vol_data.get("put_volume")
 
-            # Adjust score based on confirmation
-            if confirmed:
-                score += 15  # Bonus for confirmed
-                flags.append(f"NET CONFIRMED (${net_premium/1000:.0f}K)")
-            else:
-                score -= 20  # Penalty for contradicted
+            # V4: Contradicted penalty only (confirmed no longer gets bonus)
+            # Data showed: Confirmed 42.8% win vs Unknown 69.2%
+            # "Confirmed" may indicate crowded trades, not insider conviction
+            if not confirmed:
+                score -= 10
                 flags.append(f"!! NET BEARISH (${net_premium/1000:.0f}K)")
         else:
             net_premium = None
@@ -624,6 +653,10 @@ def scan_and_save():
             "return_30d": None,
             "outcome": None,
         }
+
+        # Final V4 score gate (after all enrichment adjustments)
+        if score < MIN_SCORE:
+            continue
 
         new_signals.append(signal)
         existing_ids.add(alert_id)
