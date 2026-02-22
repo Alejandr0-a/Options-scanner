@@ -33,8 +33,8 @@ V5 ENHANCEMENTS (Feb 22, 2026):
 - INTRADAY TIMING: scan_hour field (UTC) for time-of-day analysis
 - EXIT FRAMEWORK: peak_return, peak_checkpoint, drawdown_from_peak fields
 - BUG FIXES: exclusion list enforcement, V/OI hard gate, DTE multi-format parsing
-- DATA CAPTURE: executed_at, total_size, uw_sentiment, underlying_type from flow alerts
-- DATA CAPTURE: short_interest, shares_float, avg_30d_volume from ticker info
+- DATA CAPTURE: created_at, total_size, option_chain, iv, all_opening, has_floor, has_multileg
+- DATA CAPTURE: avg_30d_volume, shares_outstanding, beta, issue_type, has_earnings_history
 - DATA CAPTURE: 5-day options volume history (was saving only latest day)
 """
 import os
@@ -297,9 +297,11 @@ def get_ticker_info(ticker):
             "next_earnings": data.get("next_earnings_date"),
             "name": data.get("name"),
             # Free fields from same endpoint
-            "short_interest": float(data["short_interest"]) if data.get("short_interest") else None,
-            "shares_float": float(data["shares_float"]) if data.get("shares_float") else None,
-            "avg_30d_volume": int(float(data["avg_30_volume"])) if data.get("avg_30_volume") else None,
+            "avg_30d_volume": int(float(data["avg30_volume"])) if data.get("avg30_volume") else None,
+            "shares_outstanding": int(float(data["outstanding"])) if data.get("outstanding") else None,
+            "beta": float(data["beta"]) if data.get("beta") else None,
+            "issue_type": data.get("issue_type"),
+            "has_earnings_history": data.get("has_earnings_history"),
         }
 
         _ticker_info_cache[ticker] = result
@@ -618,10 +620,13 @@ def scan_and_save():
         alert_rule = alert.get("alert_rule") or alert.get("rule")
 
         # Free fields from flow alert (already fetched, just not saved before)
-        executed_at = alert.get("executed_at") or alert.get("timestamp") or ""
+        created_at = alert.get("created_at", "")  # Alert creation timestamp
         total_size = int(alert.get("total_size", 0) or 0)  # Contract count
-        uw_sentiment = alert.get("sentiment", "")  # UW's own classification
-        underlying_type = alert.get("underlying_type", "")
+        option_chain = alert.get("option_chain", "")  # Full OCC symbol
+        iv = float(alert.get("iv_end", 0) or 0)  # Implied volatility
+        all_opening = bool(alert.get("all_opening_trades", False))
+        has_floor = bool(alert.get("has_floor", False))
+        has_multileg = bool(alert.get("has_multileg", False))
 
         # --- MUST HAVE: Company context ---
         ticker_info = get_ticker_info(ticker)
@@ -631,9 +636,11 @@ def scan_and_save():
             market_cap = ticker_info.get("market_cap")
             cap_category = categorize_market_cap(market_cap)
             next_earnings = ticker_info.get("next_earnings")
-            short_interest = ticker_info.get("short_interest")
-            shares_float = ticker_info.get("shares_float")
             avg_30d_volume = ticker_info.get("avg_30d_volume")
+            shares_outstanding = ticker_info.get("shares_outstanding")
+            beta = ticker_info.get("beta")
+            issue_type_ticker = ticker_info.get("issue_type")
+            has_earnings_history = ticker_info.get("has_earnings_history")
 
             # Calculate days to earnings
             if next_earnings:
@@ -651,9 +658,11 @@ def scan_and_save():
             cap_category = None
             next_earnings = None
             days_to_earnings = None
-            short_interest = None
-            shares_float = None
             avg_30d_volume = None
+            shares_outstanding = None
+            beta = None
+            issue_type_ticker = None
+            has_earnings_history = None
 
         # --- V4: SECTOR PENALTY ---
         if sector in SECTOR_PENALTIES:
@@ -742,10 +751,13 @@ def scan_and_save():
             "alert_rule": alert_rule,
 
             # Flow alert metadata (free -- already fetched)
-            "executed_at": executed_at,
+            "created_at": created_at,
             "total_size": total_size,
-            "uw_sentiment": uw_sentiment,
-            "underlying_type": underlying_type,
+            "option_chain": option_chain,
+            "iv": iv,
+            "all_opening": all_opening,
+            "has_floor": has_floor,
+            "has_multileg": has_multileg,
 
             # MUST HAVE: Company context
             "sector": sector,
@@ -754,9 +766,11 @@ def scan_and_save():
             "cap_category": cap_category,
             "next_earnings": next_earnings,
             "days_to_earnings": days_to_earnings,
-            "short_interest": short_interest,
-            "shares_float": shares_float,
             "avg_30d_volume": avg_30d_volume,
+            "shares_outstanding": shares_outstanding,
+            "beta": beta,
+            "issue_type_ticker": issue_type_ticker,
+            "has_earnings_history": has_earnings_history,
 
             # Net premium verification
             "net_premium": net_premium,
