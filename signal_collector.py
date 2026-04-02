@@ -805,6 +805,21 @@ def scan_and_save():
             "option_return_20d": None,
             "option_return_30d": None,
 
+            # SPY benchmark for alpha calculation
+            "spy_entry_price": None,
+            "spy_return_1d": None,
+            "spy_return_3d": None,
+            "spy_return_5d": None,
+            "spy_return_10d": None,
+            "spy_return_20d": None,
+            "spy_return_30d": None,
+            "alpha_1d": None,
+            "alpha_3d": None,
+            "alpha_5d": None,
+            "alpha_10d": None,
+            "alpha_20d": None,
+            "alpha_30d": None,
+
             # Exit framework (populated by outcome tracker)
             "peak_return": None,
             "peak_checkpoint": None,
@@ -875,12 +890,36 @@ def scan_and_save():
 
             signal_updated = False
 
+            # Fetch SPY entry price for this signal's scan date (cached per date)
+            scan_date_str = signal["scan_date"]
+            spy_entry_key = f"SPY_{scan_date_str}"
+            if signal.get("spy_entry_price") is None:
+                if spy_entry_key in price_cache:
+                    spy_entry = price_cache[spy_entry_key]
+                else:
+                    spy_entry = get_historical_close("SPY", scan_date_str)
+                    if spy_entry is None:
+                        spy_entry = get_stock_price("SPY")
+                    time.sleep(0.3)
+                    price_cache[spy_entry_key] = spy_entry
+                if spy_entry:
+                    signal["spy_entry_price"] = round(spy_entry, 4)
+                    signal_updated = True
+
             for days, price_key, return_key in checkpoints:
                 # Initialize fields for older signals that don't have +1d/+3d keys
                 if price_key not in signal:
                     signal[price_key] = None
                 if return_key not in signal:
                     signal[return_key] = None
+
+                # Initialize SPY/alpha fields for older signals
+                spy_return_key = f"spy_return_{days}d"
+                alpha_key = f"alpha_{days}d"
+                if spy_return_key not in signal:
+                    signal[spy_return_key] = None
+                if alpha_key not in signal:
+                    signal[alpha_key] = None
 
                 if days_elapsed >= days and signal[price_key] is None:
                     target_date = scan_date + timedelta(days=days)
@@ -915,6 +954,35 @@ def scan_and_save():
                                 signal.get("dte"), days,
                                 signal.get("opt_type", "call")
                             )
+
+                # Calculate SPY return and alpha at this checkpoint
+                spy_entry_price = signal.get("spy_entry_price")
+                if days_elapsed >= days and signal.get(spy_return_key) is None and spy_entry_price:
+                    target_date = scan_date + timedelta(days=days)
+                    target_str = target_date.strftime("%Y-%m-%d")
+                    spy_cache_key = f"SPY_{target_str}"
+                    days_to_target = (datetime.now() - target_date).days
+
+                    if spy_cache_key in price_cache:
+                        spy_price = price_cache[spy_cache_key]
+                    elif days_to_target <= 1:
+                        spy_price = get_stock_price("SPY")
+                        time.sleep(0.3)
+                        price_cache[spy_cache_key] = spy_price
+                    else:
+                        spy_price = get_historical_close("SPY", target_str)
+                        time.sleep(0.3)
+                        price_cache[spy_cache_key] = spy_price
+
+                    if spy_price:
+                        spy_ret = round((spy_price - spy_entry_price) / spy_entry_price * 100, 2)
+                        signal[spy_return_key] = spy_ret
+                        signal_updated = True
+
+                        # Alpha = signal return - SPY return
+                        sig_ret = signal.get(return_key)
+                        if sig_ret is not None:
+                            signal[alpha_key] = round(sig_ret - spy_ret, 2)
 
             # Update exit framework: peak return, drawdown from peak
             returns_so_far = []
@@ -965,14 +1033,28 @@ def scan_and_save():
         print(f"Average return: {sum(returns)/len(returns):+.2f}%")
         print(f"Best: {max(returns):+.1f}% | Worst: {min(returns):+.1f}%")
 
+        # Alpha vs SPY summary
+        alphas_30d = [s["alpha_30d"] for s in completed if s.get("alpha_30d") is not None]
+        if alphas_30d:
+            alpha_wins = sum(1 for a in alphas_30d if a > 0)
+            print(f"\n--- ALPHA vs SPY (30d) ---")
+            print(f"Signals with alpha data: {len(alphas_30d)}")
+            print(f"Alpha win rate: {alpha_wins/len(alphas_30d)*100:.1f}% (beat SPY)")
+            print(f"Average alpha: {sum(alphas_30d)/len(alphas_30d):+.2f}%")
+            print(f"Best alpha: {max(alphas_30d):+.1f}% | Worst: {min(alphas_30d):+.1f}%")
+
         for low, high in [(100, 999), (80, 99), (70, 79)]:
             bucket = [s for s in completed if low <= s["score"] <= high]
             if bucket:
                 b_returns = [s["return_30d"] for s in bucket]
                 b_wins = sum(1 for r in b_returns if r > 0)
+                b_alphas = [s["alpha_30d"] for s in bucket if s.get("alpha_30d") is not None]
+                alpha_str = ""
+                if b_alphas:
+                    alpha_str = f" | Avg alpha: {sum(b_alphas)/len(b_alphas):+.2f}%"
                 print(f"\nScore {low}-{high}: {len(bucket)} signals")
                 print(f"  Win rate: {b_wins/len(bucket)*100:.1f}%")
-                print(f"  Avg return: {sum(b_returns)/len(b_returns):+.2f}%")
+                print(f"  Avg return: {sum(b_returns)/len(b_returns):+.2f}%{alpha_str}")
     else:
         print("\nNo completed signals yet (need 30+ days of tracking)")
 
