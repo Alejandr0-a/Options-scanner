@@ -1,0 +1,60 @@
+name: Weekly Backfill
+
+# Fills return_Xd, price_Xd, alpha_Xd, outcome, peak_return, drawdown_from_peak
+# for signals that have accumulated since the last backfill. signal_collector
+# inserts new signals with these fields = None; this workflow populates them
+# once price history is available.
+#
+# Why weekly: most checkpoints (1d, 3d, 5d, 10d, 20d, 30d) need price history
+# AFTER the scan_date. Running weekly catches everything from the prior week
+# at minimum 1d/3d/5d, and older signals reach 30d on schedule.
+#
+# Why Saturday: signal_tracker runs Mon-Fri market hours only. Saturday is
+# guaranteed-conflict-free with the per-5-min collector (no race on the
+# JSON file or git push).
+
+on:
+  schedule:
+    # Saturday 12:00 UTC = Saturday 5:00 AM PT = post-week, low-activity window
+    - cron: '0 12 * * 6'
+  workflow_dispatch:  # Manual trigger if a scheduled run fails
+
+# No cancel-in-progress: backfill is not time-sensitive; if a stale run is
+# still going, let it finish rather than risk a partial-write.
+concurrency:
+  group: weekly-backfill
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas
+
+      - name: Run fast_backfill (yfinance batch returns)
+        run: python fast_backfill.py
+
+      - name: Run backfill_alpha (SPY-relative alpha)
+        run: python backfill_alpha.py
+
+      - name: Commit and push results
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git pull --rebase || true
+          git add signal_database.json
+          git diff --staged --quiet || git commit -m "Weekly backfill $(date -u +%Y-%m-%d)"
+          git push
