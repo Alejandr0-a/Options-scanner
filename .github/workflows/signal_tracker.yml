@@ -40,7 +40,7 @@ jobs:
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
-          git add signal_database.json
+          git add signal_database.json data/
           if git diff --staged --quiet; then
             echo "No new signals to commit"
           else

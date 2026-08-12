@@ -62,6 +62,14 @@ HEADERS = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
 OUTPUT_DIR = Path(__file__).parent
 SIGNALS_FILE = OUTPUT_DIR / "signal_database.json"
 
+# Sharded storage: the hot file holds only the last HOT_WINDOW_DAYS of signals;
+# older (fully-matured) signals roll into immutable per-month archives in data/.
+# This keeps every file well under GitHub's 100MB per-file limit. HOT_WINDOW_DAYS
+# must exceed the longest outcome checkpoint (30d) so signals fully mature (all
+# price/return/alpha fields filled) before they are archived.
+DATA_DIR = OUTPUT_DIR / "data"
+HOT_WINDOW_DAYS = 45
+
 # Quality thresholds (V4: lowered to capture more signals on tighter scale)
 MIN_SCORE = 20
 MIN_VOI_RATIO = 5.0
@@ -112,9 +120,57 @@ def load_signals():
 
 
 def save_signals(data):
-    """Save signals to file"""
+    """Save the hot file (recent signals only). Pure writer; no archiving."""
     with open(SIGNALS_FILE, 'w') as f:
         json.dump(data, f, separators=(",", ":"))
+
+
+def archive_old_signals(data):
+    """Roll fully-matured signals (scan_date older than HOT_WINDOW_DAYS) out of
+    the hot file into per-month archive shards data/signals-YYYY-MM.json, and
+    trim them from data["signals"] in place.
+
+    Lossless + idempotent: each signal is appended to its month shard (deduped by
+    alert_id) BEFORE being dropped from the hot list, and shards are only ever
+    appended to. Archived signals are older than the 30d max checkpoint, so their
+    outcome fields are already filled -- shards are effectively immutable.
+    """
+    cutoff = (datetime.now() - timedelta(days=HOT_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    keep, rollout = [], []
+    for s in data["signals"]:
+        sd = s.get("scan_date")
+        if sd and sd < cutoff:
+            rollout.append(s)
+        else:
+            keep.append(s)  # recent, undated, or at cutoff -> stays hot
+    if not rollout:
+        return
+
+    DATA_DIR.mkdir(exist_ok=True)
+    by_month = {}
+    for s in rollout:
+        by_month.setdefault(s["scan_date"][:7], []).append(s)
+
+    for month, sigs in sorted(by_month.items()):
+        shard = DATA_DIR / f"signals-{month}.json"
+        if shard.exists():
+            with open(shard) as f:
+                existing = json.load(f)
+        else:
+            existing = {"signals": []}
+        seen = {x.get("alert_id") for x in existing["signals"]}
+        added = 0
+        for s in sigs:
+            if s.get("alert_id") not in seen:
+                existing["signals"].append(s)
+                seen.add(s.get("alert_id"))
+                added += 1
+        with open(shard, 'w') as f:
+            json.dump(existing, f, separators=(",", ":"))
+        print(f"  Archived {added} signals -> data/{shard.name} ({len(existing['signals'])} total)")
+
+    data["signals"] = keep
+    print(f"Hot file now holds {len(keep)} signals (last {HOT_WINDOW_DAYS} days)")
 
 
 def get_stock_price(ticker):
@@ -1013,6 +1069,9 @@ def scan_and_save():
 
         print(f"Updated {update_count} signals with price data")
 
+    # Roll signals older than the hot window into monthly archive shards,
+    # then write the (bounded) hot file.
+    archive_old_signals(data)
     save_signals(data)
 
     # Summary stats
@@ -1060,7 +1119,9 @@ def scan_and_save():
 
     pending = [s for s in data["signals"] if s.get("return_30d") is None]
     print(f"\nPending signals: {len(pending)}")
-    print(f"\nTotal tracked: {len(data['signals'])}")
+    n_shards = len(list(DATA_DIR.glob("signals-*.json"))) if DATA_DIR.exists() else 0
+    print(f"\nHot window: {len(data['signals'])} signals (last {HOT_WINDOW_DAYS}d)"
+          f" + {n_shards} monthly archive shard(s) in data/ (full history)")
 
 
 if __name__ == "__main__":
