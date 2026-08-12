@@ -188,7 +188,7 @@ def main():
 
     # 7. Save
     with open(SIGNALS_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, separators=(",", ":"))
     print(f"\nSaved to {SIGNALS_FILE}")
 
     # 8. Summary

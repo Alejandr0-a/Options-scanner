@@ -239,7 +239,7 @@ def backfill():
     # Save
     print("\nSaving...")
     with open(SIGNALS_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, separators=(",", ":"))
     print("Done!")
 
 

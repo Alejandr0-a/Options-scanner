@@ -114,7 +114,7 @@ def load_signals():
 def save_signals(data):
     """Save signals to file"""
     with open(SIGNALS_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, separators=(",", ":"))
 
 
 def get_stock_price(ticker):

@@ -368,7 +368,7 @@ def main():
     total_updates = mc_count + enrich_count + outcome_count
     if total_updates > 0:
         with open(SIGNALS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, separators=(",", ":"))
         print(f"\nSaved {total_updates} total updates.")
     else:
         print("\nNo updates needed.")
